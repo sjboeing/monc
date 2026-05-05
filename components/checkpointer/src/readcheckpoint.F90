@@ -1,4 +1,6 @@
 !> Will read in a NetCDF checkpoint file and initialise the model state_mod based upon this
+! The content of this file have been modified with the assistance of
+! University of Leeds, m365 co-pilot
 module checkpointer_read_checkpoint_mod
 #ifndef TEST_MODE
   use netcdf, only : nf90_global, nf90_nowrite, nf90_inquire_attribute, nf90_open, nf90_inq_dimid, nf90_inquire_dimension, &

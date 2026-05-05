@@ -86,6 +86,7 @@ module state_mod
     type(prognostic_field_type) :: u, w, v, th, p, zu, zw, zv, zth, su, sw, sv, sth, savu, savv, & 
          savw, vis_coefficient, &
          diff_coefficient, dis, dis_th, &
+         sgs_tke, sgs_dissipation, & ! SB Added these sgs fields for CASIM tke coupling
          ! Heating rates from socrates
          sth_lw, sth_sw
     type(prognostic_field_type), dimension(:), allocatable :: q, zq, sq, disq

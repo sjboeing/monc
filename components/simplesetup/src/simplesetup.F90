@@ -121,6 +121,8 @@ contains
     ! Set arrays for radiative heating rates - Note: this should be protected by a switch
     call allocate_prognostic(current_state%sth_lw, alloc_z, alloc_y, alloc_x, DUAL_GRID, DUAL_GRID, DUAL_GRID)
     call allocate_prognostic(current_state%sth_sw, alloc_z, alloc_y, alloc_x, DUAL_GRID, DUAL_GRID, DUAL_GRID) 
+    call allocate_prognostic(current_state%sgs_tke, alloc_z, alloc_y, alloc_x, DUAL_GRID, DUAL_GRID, DUAL_GRID) 
+    call allocate_prognostic(current_state%sgs_dissipation, alloc_z, alloc_y, alloc_x, DUAL_GRID, DUAL_GRID, DUAL_GRID) 
 
   end subroutine allocate_prognostics
 

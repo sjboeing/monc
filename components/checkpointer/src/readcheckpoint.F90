@@ -291,6 +291,7 @@ contains
 
     integer :: i
     logical :: multi_process
+    integer :: alloc_x, alloc_y, alloc_z
     type(q_metadata_type) :: q_metadata
     character(len=STRING_LENGTH) :: q_field_name, zq_field_name
     character(len=STRING_LENGTH) :: tracer_field_name, ztracer_field_name
@@ -395,6 +396,12 @@ contains
        call load_single_3d_field(ncid, current_state%local_grid, current_state%sth_sw, DUAL_GRID, &
             DUAL_GRID, DUAL_GRID, STH_SW_KEY, multi_process)
     endif
+    ! New fields, just allocate as they are effectively diagnostics
+    alloc_z=current_state%local_grid%size(Z_INDEX) + current_state%local_grid%halo_size(Z_INDEX) * 2
+    alloc_y=current_state%local_grid%size(Y_INDEX) + current_state%local_grid%halo_size(Y_INDEX) * 2
+    alloc_x=current_state%local_grid%size(X_INDEX) + current_state%local_grid%halo_size(X_INDEX) * 2
+    call allocate_prognostic(current_state%sgs_tke, alloc_z, alloc_y, alloc_x, DUAL_GRID, DUAL_GRID, DUAL_GRID)
+    call allocate_prognostic(current_state%sgs_dissipation, alloc_z, alloc_y, alloc_x, DUAL_GRID, DUAL_GRID, DUAL_GRID)
   end subroutine load_all_fields
 
   !> Determines whether a variable (field) exists within the NetCDF checkpoint file
@@ -447,8 +454,10 @@ contains
     end if
   end function get_number_q_indices  
 
-  !> Loads in and initialises a single 3D prognostic field. Even if the model is being run in 1 or 2D, the fields
-  !! are still stored in 3D with the missing dimension sizes being set to one.
+  !> Loads in and initialises a single 3D prognostic field. Even if the model is
+  !! being run in 1 or 2D, the fields are still stored in 3D with the missing
+  !! dimension sizes being set to one.
+  !!
   !! @param ncid The NetCDF file id
   !! @param field The prognostic field that will be initialised from the checkpoint
   !! @param grid The grid that the prognostic field is on
@@ -456,7 +465,12 @@ contains
   !! @param dim_one Size in dimension one
   !! @param dim_two Size in dimension two
   !! @param dim_three Size in dimension three
-  subroutine load_single_3d_field(ncid, local_grid, field, z_grid, y_grid, x_grid, variable_key, multi_process, fourth_dim_loc)
+  subroutine load_single_3d_field(ncid, local_grid, field, z_grid, y_grid, x_grid, &
+                                  variable_key, multi_process, fourth_dim_loc)
+
+    use mpi,          only : MPI_COMM_WORLD, MPI_Abort
+    use logging_mod,  only : LOG_ERROR, log_log
+
     character(len=*), intent(in) :: variable_key
     integer, intent(in) :: z_grid, y_grid, x_grid, ncid
     type(prognostic_field_type), intent(inout) :: field
@@ -465,51 +479,118 @@ contains
     integer, optional, intent(in) :: fourth_dim_loc
 
     integer :: start(5), count(5), i, map(5)
+    integer :: need_z, need_y, need_x
+    integer :: alloc_z, alloc_y, alloc_x
+    integer :: ierr
 
     if (allocated(field%data)) deallocate(field%data)
-    allocate(field%data(local_grid%size(Z_INDEX) + local_grid%halo_size(Z_INDEX) * 2, local_grid%size(Y_INDEX) + &
-         local_grid%halo_size(Y_INDEX) * 2, local_grid%size(X_INDEX) + local_grid%halo_size(X_INDEX) * 2))
-    field%data(:,:,:)=0.
+
+    allocate(field%data( local_grid%size(Z_INDEX) + local_grid%halo_size(Z_INDEX) * 2, &
+                         local_grid%size(Y_INDEX) + local_grid%halo_size(Y_INDEX) * 2, &
+                         local_grid%size(X_INDEX) + local_grid%halo_size(X_INDEX) * 2 ))
+    field%data(:,:,:) = 0.0
+
+    !------------------------------------------------------------------
+    ! Guard 1: local domain must be valid
+    !------------------------------------------------------------------
+    need_z = local_grid%local_domain_end_index(Z_INDEX) - &
+             local_grid%local_domain_start_index(Z_INDEX) + 1
+    need_y = local_grid%local_domain_end_index(Y_INDEX) - &
+             local_grid%local_domain_start_index(Y_INDEX) + 1
+    need_x = local_grid%local_domain_end_index(X_INDEX) - &
+             local_grid%local_domain_start_index(X_INDEX) + 1
+
+    if (need_z <= 0 .or. need_y <= 0 .or. need_x <= 0) then
+      call log_log(LOG_ERROR, &
+        "Checkpoint restart error: invalid local domain for variable '" // &
+        trim(variable_key) // "' sizes = (" // &
+        trim(conv_to_string(need_z)) // "," // &
+        trim(conv_to_string(need_y)) // "," // &
+        trim(conv_to_string(need_x)) // ")" )
+      call MPI_Abort(MPI_COMM_WORLD, 301, ierr)
+    end if
+
+    alloc_z = size(field%data,1)
+    alloc_y = size(field%data,2)
+    alloc_x = size(field%data,3)
+
+    if (need_z > alloc_z .or. need_y > alloc_y .or. need_x > alloc_x) then
+      call log_log(LOG_ERROR, &
+        "Checkpoint restart error: slab exceeds allocation for variable '" // &
+        trim(variable_key) // "'" )
+      call log_log(LOG_ERROR, &
+        "  Required (z,y,x) = (" // trim(conv_to_string(need_z)) // "," // &
+                                trim(conv_to_string(need_y)) // "," // &
+                                trim(conv_to_string(need_x)) // ")" )
+      call log_log(LOG_ERROR, &
+        "  Allocated (z,y,x)= (" // trim(conv_to_string(alloc_z)) // "," // &
+                                trim(conv_to_string(alloc_y)) // "," // &
+                                trim(conv_to_string(alloc_x)) // ")" )
+      call MPI_Abort(MPI_COMM_WORLD, 302, ierr)
+    end if
 
     if (multi_process .or. present(fourth_dim_loc)) then
-      do i=1,3
-        if (i==1) then
-          map(i)=1
+
+      do i = 1, 3
+        if (i == 1) then
+          map(i) = 1
         else
-          map(i)=map(i-1)*local_grid%size(i-1)
+          map(i) = map(i-1) * local_grid%size(i-1)
         end if
         start(i) = local_grid%start(i)
         count(i) = local_grid%size(i)
       end do
+
+      !--------------------------------------------------------------
+      ! Guard 2: NetCDF counts must be positive
+      !--------------------------------------------------------------
+      if (any(count(1:3) <= 0)) then
+        call log_log(LOG_ERROR, &
+          "Checkpoint restart error: non-positive NetCDF count for variable '" // &
+          trim(variable_key) // "'" )
+        call MPI_Abort(MPI_COMM_WORLD, 303, ierr)
+      end if
+
       if (present(fourth_dim_loc)) then
         start(4) = fourth_dim_loc
         count(4) = 1
-        map(4)=map(3)*local_grid%size(3)
+        map(4)   = map(3) * local_grid%size(3)
 
-        start(5)=1
-        count(5)=1
-        map(5)=map(4)
+        start(5) = 1
+        count(5) = 1
+        map(5)   = map(4)
       else
-        start(4)=1
-        map(4)=map(3)*local_grid%size(3)
-        count(4)=1
+        start(4) = 1
+        count(4) = 1
+        map(4)   = map(3) * local_grid%size(3)
       end if
 
-      call read_single_variable(ncid, variable_key, real_data_3d=field%data(local_grid%local_domain_start_index(Z_INDEX):&
-           local_grid%local_domain_end_index(Z_INDEX),local_grid%local_domain_start_index(Y_INDEX):&
-           local_grid%local_domain_end_index(Y_INDEX), local_grid%local_domain_start_index(X_INDEX):&
-           local_grid%local_domain_end_index(X_INDEX)), start=start, count=count, map=map)
+      call read_single_variable(ncid, variable_key, &
+        real_data_3d = field%data( &
+          local_grid%local_domain_start_index(Z_INDEX): &
+          local_grid%local_domain_end_index(Z_INDEX),  &
+          local_grid%local_domain_start_index(Y_INDEX): &
+          local_grid%local_domain_end_index(Y_INDEX),  &
+          local_grid%local_domain_start_index(X_INDEX): &
+          local_grid%local_domain_end_index(X_INDEX)), &
+        start = start, count = count, map = map)
+
     else
-      call read_single_variable(ncid, variable_key, real_data_3d=field%data(local_grid%local_domain_start_index(Z_INDEX):&
-           local_grid%local_domain_end_index(Z_INDEX),local_grid%local_domain_start_index(Y_INDEX):&
-           local_grid%local_domain_end_index(Y_INDEX), local_grid%local_domain_start_index(X_INDEX):&
-           local_grid%local_domain_end_index(X_INDEX)))
+      call read_single_variable(ncid, variable_key, &
+        real_data_3d = field%data( &
+          local_grid%local_domain_start_index(Z_INDEX): &
+          local_grid%local_domain_end_index(Z_INDEX),  &
+          local_grid%local_domain_start_index(Y_INDEX): &
+          local_grid%local_domain_end_index(Y_INDEX),  &
+          local_grid%local_domain_start_index(X_INDEX): &
+          local_grid%local_domain_end_index(X_INDEX)))
     end if
 
     field%grid(Z_INDEX) = z_grid
     field%grid(Y_INDEX) = y_grid
     field%grid(X_INDEX) = x_grid
     field%active = .true.
+
   end subroutine load_single_3d_field
 
   !> Reads in and initialises the primal grid from the NetCDF checkpoint and will handle 1, 2 or 3D runs

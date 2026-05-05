@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+#PBS -N stitch_chain
+#PBS -S /bin/bash
+#PBS -l select=1:ncpus=64:mpiprocs=64
+#PBS -l walltime=03:00:00
+#PBS -q collab
+#PBS -j oe
+
+set -Eeuo pipefail
+cd "$PBS_O_WORKDIR"
+
+echo "[INFO] Job started at $(date)"
+echo "[INFO] Working directory: $PWD"
+
+# ---------- Walltime handler ----------
+WALLTIME_EXIT=0
+
+handle_term() {
+  echo "[WARN] Caught SIGTERM (likely walltime); exiting cleanly"
+  WALLTIME_EXIT=1
+}
+
+trap handle_term TERM
+
+# -----------------------
+# Chain control
+# -----------------------
+
+CHAIN_INDEX="${CHAIN_INDEX:-0}"
+MAX_CHAIN=100
+
+echo "[INFO] Chain index: $CHAIN_INDEX"
+
+if (( CHAIN_INDEX >= MAX_CHAIN )); then
+  echo "[INFO] Maximum chain length reached — stopping"
+  exit 0
+fi
+
+# -----------------------
+# Guard: are we done?
+# -----------------------
+
+if [[ -f STITCH.ALL.DONE ]]; then
+  echo "[INFO] STITCH.ALL.DONE present — nothing to do"
+  exit 0
+fi
+
+# -----------------------
+# Submit next job first
+# -----------------------
+
+qsub -W depend=afterok:$PBS_JOBID \
+     -v CHAIN_INDEX=$((CHAIN_INDEX+1)) \
+     "$0"
+
+echo "[INFO] Submitted next chain job"
+
+# -----------------------
+# Environment
+# -----------------------
+
+module load scitools
+source "$HOME/py39env/bin/activate"
+
+# Prevent oversubscription
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+
+# -----------------------
+# Run stitching
+# -----------------------
+
+python ./stitch_v2.py \
+  --datasets \
+    "$PWD/arm_2d" \
+    "$PWD/arm_3d" \
+    "$PWD/arm_2d_burst" \
+    "$PWD/arm_3d_burst" \
+  --concurrency-a 8 \
+  --concurrency-b 16 \
+  --threads-a 2 \
+  --threads-b 1 \
+  || PYEXIT=$?
+
+if [[ "${WALLTIME_EXIT}" -eq 1 ]]; then
+  echo "[INFO] Walltime termination — exiting 0 to allow restart"
+  exit 0
+fi
+
+if [[ -n "${PYEXIT:-}" && "${PYEXIT}" -ne 0 ]]; then
+  echo "[ERROR] stitch_v2.py failed with exit ${PYEXIT}"
+  exit "${PYEXIT}"
+fi
+
+# Normal completion
+echo "[INFO] Stitch iteration finished at $(date)"
+exit 0

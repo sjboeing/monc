@@ -65,6 +65,9 @@ pdf_analysis_enabled=.false.
 tracers_enabled=.false.
 trajectories_enabled=.false.
 radioactive_tracers_enabled=.false.
+simple_netcdf_dump_enabled=.false.
+simple_2d_diagnostics_enabled=.false.
+simple_tke_enabled=.false.
 
 # Default disable the test case components (individual user config will enable these)
 bubble_enabled=.false.
@@ -85,16 +88,16 @@ last_group_type=entire
 
 start_group_contents=clearsourceterms, stepping_direction, halo_swapper, lateral_bcs, setfluxlook
 subgrid_group_contents=lower_bc, smagorinsky
-dynamics_group_contents=kidtestcase, pw_advection, tvd_advection, th_advection, diffusion, viscosity, coriolis, buoyancy, damping, forcing, set_consistent_lowbc, socrates_couple, lwrad_exponential, simplecloud, casim, tracers, flux_budget, subgrid_profile_diagnostics, diverr, psrce, diagnostics_3d, profile_diagnostics, casim_profile_dgs, scalar_diagnostics, immersed_boundary, ib_finalise, vert_filter, stepfields
+dynamics_group_contents=kidtestcase, pw_advection, tvd_advection, th_advection, diffusion, viscosity, coriolis, buoyancy, damping, forcing, set_consistent_lowbc, socrates_couple, lwrad_exponential, simplecloud, simple_tke, casim, tracers, flux_budget, subgrid_profile_diagnostics, diverr, psrce, diagnostics_3d, profile_diagnostics, casim_profile_dgs, scalar_diagnostics, immersed_boundary, ib_finalise, vert_filter, stepfields
 
 solver_group_contents=pdf_analysis, mean_profiles, fftsolver, filter, iterativesolver, iterativesolver_single_prec, petsc_solver, cfltest
 pressure-terms_group_contents=pstep, swap_smooth, conditional_diagnostics_column
-last_group_contents=conditional_diagnostics_whole, checkpointer, model_synopsis, termination_check, iobridge
+last_group_contents=conditional_diagnostics_whole, checkpointer, model_synopsis, termination_check, iobridge, simple_netcdf_dump, simple_2d_diagnostics
 
 # Component ordering for other stages
 
-initialisation_stage_ordering=decomposition, kidreader, kidtestcase, checkpointer, simplesetup, grid_manager, mean_profiles, swap_smooth, termination_check, simplecloud, casim, tracers, coriolis, buoyancy, cfltest, damping, diverr, fftsolver, filter, halo_swapper, iterativesolver, iterativesolver_single_prec, setfluxlook, lower_bc, physicsa, psrce, pw_advection, diffusion, set_consistent_lowbc, viscosity, smagorinsky, stepfields, stepping_direction, tvd_advection, model_synopsis, socrates_couple, lwrad_exponential, th_advection, randomnoise, forcing, immersed_boundary, ib_finalise, vert_filter, flux_budget, diagnostics_3d, profile_diagnostics, casim_profile_dgs, conditional_diagnostics_column, conditional_diagnostics_whole, pdf_analysis, subgrid_profile_diagnostics, scalar_diagnostics, lateral_bcs, petsc_solver, pstep, iobridge
-finalisation_stage_ordering=iobridge, checkpointer, diverr, fftsolver, filter, grid_manager, halo_swapper, iterativesolver, iterativesolver_single_prec, physicsa, psrce, smagorinsky, tvd_advection, socrates_couple, lwrad_exponential, model_synopsis, mean_profiles, pdf_analysis, forcing, immersed_boundary,  ib_finalise, vert_filter, stepfields, flux_budget, coriolis, buoyancy, diffusion, lower_bc, viscosity, profile_diagnostics, pw_advection, th_advection, damping, simplecloud, tracers, pstep, conditional_diagnostics_whole, conditional_diagnostics_column
+initialisation_stage_ordering=decomposition, kidreader, kidtestcase, checkpointer, simplesetup, grid_manager, mean_profiles, swap_smooth, termination_check, simplecloud, simple_tke, casim, tracers, coriolis, buoyancy, cfltest, damping, diverr, fftsolver, filter, halo_swapper, iterativesolver, iterativesolver_single_prec, setfluxlook, lower_bc, physicsa, psrce, pw_advection, diffusion, set_consistent_lowbc, viscosity, smagorinsky, stepfields, stepping_direction, tvd_advection, model_synopsis, socrates_couple, lwrad_exponential, th_advection, randomnoise, forcing, immersed_boundary, ib_finalise, vert_filter, flux_budget, diagnostics_3d, profile_diagnostics, casim_profile_dgs, conditional_diagnostics_column, conditional_diagnostics_whole, pdf_analysis, subgrid_profile_diagnostics, scalar_diagnostics, lateral_bcs, petsc_solver, pstep, iobridge, simple_netcdf_dump, simple_2d_diagnostics
+finalisation_stage_ordering=iobridge, checkpointer, diverr, fftsolver, filter, grid_manager, halo_swapper, iterativesolver, iterativesolver_single_prec, physicsa, psrce, smagorinsky, tvd_advection, socrates_couple, lwrad_exponential, model_synopsis, mean_profiles, pdf_analysis, forcing, immersed_boundary,  ib_finalise, vert_filter, stepfields, flux_budget, coriolis, buoyancy, diffusion, lower_bc, viscosity, profile_diagnostics, pw_advection, th_advection, damping, simplecloud, tracers, pstep, conditional_diagnostics_whole, conditional_diagnostics_column, simple_tke, simple_netcdf_dump, simple_2d_diagnostics
 
 # Control configuration
 nn_timesteps=-1
@@ -119,7 +122,7 @@ print_debug_data=.false.         # Prints data for specific variables/point afte
 pdd_x=-999                       # global grid x coordinate of print_debug_data grid point
 pdd_y=-999                       #   "     "   y   "          "              " 
 pdd_z=-999                       #   "     "   z   "          "              " 
-l_thoff=.false.                  # When .true., disables threading in the IOserver
+l_thoff=.true.                   # When .true., disables threading in the IOserver
 
 #Tracer configuration
 traj_interval=                   # name of config variable used to set 3d_tracers output_frequency
@@ -374,7 +377,7 @@ surface_vapour_mixing_ratio=0.0
 # IO server configuration
 ioserver_configuration_file="io/description.xml"
 moncs_per_io_server=3
-enable_io_server=.true.
+enable_io_server=.false.
 
 # Kid reader configuration
 kid_configuration_file=""
@@ -663,3 +666,29 @@ l_rcemip_ozone=.false.
 l_rcemip_gases=.false.
 l_rcemip_lowerbc=.false.
 #l_rcemip_tracers=.false. # To implement, see ticket #376/349 for branch monc/main/branches/dev/toddjones/vn0.9.0_RCEMIP
+
+dump_2d_interval               = 120.0
+dump_2d_per_file               = 30
+dump_2d_base_filename          = simple2d
+dump_2d_dir                    = dump_2d
+dump_2d_micro_stagger          = true
+dump_2d_micro_stagger_max_us   = 200.0   
+dump_2d_burst_enabled          = true
+dump_2d_burst_start            = 3600.0
+dump_2d_burst_end              = 3900.0
+dump_2d_burst_interval         = 10.0
+dump_2d_burst_per_file         = 30
+dump_2d_write_t0               = true
+
+dump_3d_interval               = 600.0
+dump_3d_per_file               = 6
+dump_3d_base_filename          = simple3d
+dump_3d_dir                    = dump_3d
+dump_3d_micro_stagger          = true
+dump_3d_micro_stagger_max_us   = 200.0
+dump_3d_burst_enabled          = true
+dump_3d_burst_start            = 3600.0
+dump_3d_burst_end              = 3900.0
+dump_3d_burst_interval         = 30.0
+dump_3d_burst_per_file         = 6
+dump_3d_write_t0               = true

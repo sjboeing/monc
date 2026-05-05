@@ -54,3 +54,6 @@ call add_component(component_descriptions, conditional_diagnostics_column_get_de
 call add_component(component_descriptions, conditional_diagnostics_whole_get_descriptor())
 call add_component(component_descriptions, pdf_analysis_get_descriptor())
 call add_component(component_descriptions, tracers_get_descriptor())
+call add_component(component_descriptions, simple_netcdf_dump_get_descriptor())
+call add_component(component_descriptions, simple_2d_diagnostics_get_descriptor())
+call add_component(component_descriptions, simple_tke_get_descriptor())

@@ -8,6 +8,9 @@ Changes:
   - Ensure x/y contain no NaNs or masked values
   - Fail early if coordinates look malformed
   - Preserve stitching and compression logic as before
+
+# The content of this file has been produced with the assistance of
+# University of Leeds, m365 co-pilot
 """
 
 import argparse

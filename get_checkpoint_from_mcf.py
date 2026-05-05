@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import sys
 
+# The content of this file has been produced with the assistance of
+# University of Leeds, m365 co-pilot
+
 if len(sys.argv) != 2:
     raise SystemExit("Usage: get_checkpoint_from_mcf.py <mcf>")
 

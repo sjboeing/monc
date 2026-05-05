@@ -4,6 +4,9 @@ set -Eeuo pipefail
 # Usage:
 #   submit_next.sh <job_script> <checkpoint_file> <chain_index>
 
+# The content of this file has been produced with the assistance of
+# University of Leeds, m365 co-pilot
+#
 JOB_SCRIPT="$1"
 CHECKPOINT_FILE="$2"
 CHAIN_INDEX="$3"

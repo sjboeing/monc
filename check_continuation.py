@@ -2,6 +2,9 @@
 import sys
 import os
 
+# The content of this file has been produced with the assistance of
+# University of Leeds, m365 co-pilot
+
 if len(sys.argv) != 2:
     raise SystemExit("Usage: check_continuation.py <logfile>")
 

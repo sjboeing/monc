@@ -5,6 +5,9 @@
 #PBS -q collab
 #PBS -j oe
 
+# The content of this file has been produced with the assistance of
+# University of Leeds, m365 co-pilot
+
 ########################################################################
 ## Strict mode
 ########################################################################

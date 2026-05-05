@@ -42,7 +42,7 @@ contains
 
     integer :: i
 
-    call handle_sampling(current_state)
+    !call handle_sampling(current_state)
 
     do i=1,size(group_descriptors)      
       if (group_descriptors(i)%type == GROUP_TYPE_WHOLE) then

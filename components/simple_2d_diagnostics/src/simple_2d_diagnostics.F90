@@ -243,6 +243,10 @@ subroutine timestep(state)
   logical :: rollover_local, rollover_all
   integer :: ierr
 
+  ! >>> ADDED FOR SLOT COMPLETION PATCH <<<
+  real(real64) :: win_start64, interval64
+  integer :: r_now, tlen_local, ierr
+
   t = state%time
 
   ! ================= NORMAL =================
@@ -268,6 +272,33 @@ subroutine timestep(state)
                     (dump2d_write_t0 .and. .not. state%continuation_run .and. &
                      .not. sink_norm%wrote_t0 .and. t == 0.0_default_precision)
 
+  ! Ensure one write attempt after restart (existing logic)
+  if (state%continuation_run .and. .not. sink_norm%continuation_checked) then
+    want_write_norm = .true.
+  end if
+
+  ! >>> CRITICAL PATCH: enforce slot completion <<<
+  if (state%continuation_run) then
+
+    win_start64 = real(sink_norm%window_anchor + &
+                       sink_norm%file_index * sink_norm%file_window, real64)
+    interval64  = real(sink_norm%write_interval, real64)
+
+    r_now = compute_rec_index(real(t,real64), win_start64, interval64)
+
+    tlen_local = 0
+    if (sink_norm%opened) then
+      ierr=nf90_inquire_dimension(sink_norm%ncid, &
+                                 sink_norm%dim_t, len=tlen_local)
+      if (ierr /= NF90_NOERR) call io_fatal('2D:timestep slot completion', ierr)
+    end if
+
+    if (r_now > tlen_local) then
+      want_write_norm = .true.
+    end if
+
+  end if
+
   call process_sink_write(sink_norm, state, t, want_write_norm)
 
   ! ================= BURST ==================
@@ -292,6 +323,39 @@ subroutine timestep(state)
   want_write_burst = burst_enabled .and. &
                      t >= burst_start .and. t < burst_end .and. &
                      t >= sink_burst%next_write_time
+
+  ! Ensure one write attempt after restart (existing logic)
+  if (state%continuation_run .and. .not. sink_burst%continuation_checked) then
+    if (burst_enabled .and. t >= burst_start .and. t < burst_end) then
+      want_write_burst = .true.
+    end if
+  end if
+
+  ! >>> CRITICAL PATCH (burst) <<<
+  if (state%continuation_run) then
+
+    if (burst_enabled .and. t >= burst_start .and. t < burst_end) then
+
+      win_start64 = real(sink_burst%window_anchor + &
+                         sink_burst%file_index * sink_burst%file_window, real64)
+      interval64  = real(sink_burst%write_interval, real64)
+
+      r_now = compute_rec_index(real(t,real64), win_start64, interval64)
+
+      tlen_local = 0
+      if (sink_burst%opened) then
+        ierr=nf90_inquire_dimension(sink_burst%ncid, &
+                                   sink_burst%dim_t, len=tlen_local)
+        if (ierr /= NF90_NOERR) call io_fatal('2D:timestep slot completion', ierr)
+      end if
+
+      if (r_now > tlen_local) then
+        want_write_burst = .true.
+      end if
+
+    end if
+
+  end if
 
   call process_sink_write(sink_burst, state, t, want_write_burst)
 
@@ -422,7 +486,7 @@ end subroutine timestep
    logical, intent(in) :: want_write
    integer :: rec
    ! NEW locals (minimal)
-   integer :: r, tlen, ierr
+   integer :: r, tlen, ierr, r_here
    real(real64) :: win_start64, interval64, tol, t_here(1)
 
    if (.not. want_write) return
@@ -441,13 +505,16 @@ end subroutine timestep
    ! One-time continuation guard (per simulation per sink)
    sink%skip_this_write = .false.
    if (state%continuation_run .and. .not. sink%continuation_checked) then
-     tol = default_time_tolerance(interval64)
      ierr = nf90_inquire_dimension(sink%ncid, sink%dim_t, len=tlen)
-     if (ierr == NF90_NOERR .and. r <= max(0, tlen)) then
-       ierr = nf90_get_var(sink%ncid, sink%var_time, t_here, start=(/r/), count=(/1/))
-       if (ierr == NF90_NOERR .and. t_here(1) == t_here(1)) then  ! finite
-         if (t_here(1) < real(t,real64) - tol) sink%skip_this_write = .true.
-       end if
+     if (ierr == NF90_NOERR .and. r <= tlen) then
+       ierr = nf90_get_var(sink%ncid, sink%var_time, t_here, &
+                         start=(/r/), count=(/1/))
+       if (ierr == NF90_NOERR .and. t_here(1) == t_here(1)) then
+         r_here = compute_rec_index(t_here(1), win_start64, interval64)
+         if (r_here == r) then
+           sink%skip_this_write = .true.
+         end if
+      end if
      end if
      sink%continuation_checked = .true.
    end if

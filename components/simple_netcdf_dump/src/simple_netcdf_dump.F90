@@ -264,7 +264,7 @@ contains
   logical, intent(in) :: want_write
   integer :: rec
   ! NEW locals (minimal)
-  integer :: r, tlen, ierr
+  integer :: r, tlen, ierr, r_here
   real(real64) :: win_start64, interval64, tol, t_here(1)
 
   if (.not. want_write) return
@@ -281,13 +281,16 @@ contains
   ! One-time continuation guard (per simulation per sink)
   sink%skip_this_write = .false.
   if (state%continuation_run .and. .not. sink%continuation_checked) then
-    tol = default_time_tolerance(interval64)
     ierr = nf90_inquire_dimension(sink%ncid, sink%dim_t, len=tlen)
-    if (ierr == NF90_NOERR .and. r <= max(0, tlen)) then
-      ierr = nf90_get_var(sink%ncid, sink%var_time, t_here, start=(/r/), count=(/1/))
+    if (ierr == NF90_NOERR .and. r <= tlen) then
+      ierr = nf90_get_var(sink%ncid, sink%var_time, t_here, &
+                         start=(/r/), count=(/1/))
       if (ierr == NF90_NOERR .and. t_here(1) == t_here(1)) then
-        if (t_here(1) < real(t,real64) - tol) sink%skip_this_write = .true.
-      end if
+        r_here = compute_rec_index(t_here(1), win_start64, interval64)
+        if (r_here == r) then
+          sink%skip_this_write = .true.
+        end if
+     end if
     end if
     sink%continuation_checked = .true.
   end if
@@ -324,13 +327,17 @@ contains
   end if
  end subroutine process_sink_write
  
- subroutine timestep(state)
+subroutine timestep(state)
   use mpi
   type(model_state_type), target, intent(inout) :: state
   real(default_precision) :: t
   logical :: want_write_norm, want_write_burst
   logical :: rollover_local, rollover_all
   integer :: ierr
+
+  ! >>> ADDED FOR SLOT COMPLETION PATCH <<<
+  real(real64) :: win_start64, interval64
+  integer :: r_now, tlen_local
 
   t = state%time
 
@@ -357,6 +364,33 @@ contains
                     (dump3d_write_t0 .and. .not. state%continuation_run .and. &
                      .not. sink_norm%wrote_t0 .and. t == 0.0_default_precision)
 
+  ! Ensure one write attempt after restart (existing logic)
+  if (state%continuation_run .and. .not. sink_norm%continuation_checked) then
+    want_write_norm = .true.
+  end if
+
+  ! >>> CRITICAL PATCH: enforce slot completion <<<
+  if (state%continuation_run) then
+
+    win_start64 = real(sink_norm%window_anchor + &
+                       sink_norm%file_index * sink_norm%file_window, real64)
+    interval64  = real(sink_norm%write_interval, real64)
+
+    r_now = compute_rec_index(real(t,real64), win_start64, interval64)
+
+    tlen_local = 0
+    if (sink_norm%opened) then
+      ierr=nf90_inquire_dimension(sink_norm%ncid, &
+                                 sink_norm%dim_t, len=tlen_local)
+      if (ierr /= NF90_NOERR) call io_fatal('2D:timestep slot completion', ierr)
+    end if
+
+    if (r_now > tlen_local) then
+      want_write_norm = .true.
+    end if
+
+  end if
+
   call process_sink_write(sink_norm, state, t, want_write_norm)
 
   ! ================= BURST ==================
@@ -380,6 +414,39 @@ contains
   want_write_burst = burst_enabled .and. &
                      t >= burst_start .and. t < burst_end .and. &
                      t >= sink_burst%next_write_time
+
+  ! Ensure one write attempt after restart
+  if (state%continuation_run .and. .not. sink_burst%continuation_checked) then
+    if (burst_enabled .and. t >= burst_start .and. t < burst_end) then
+      want_write_burst = .true.
+    end if
+  end if
+
+  ! >>> CRITICAL PATCH (burst) <<<
+  if (state%continuation_run) then
+
+    if (burst_enabled .and. t >= burst_start .and. t < burst_end) then
+
+      win_start64 = real(sink_burst%window_anchor + &
+                         sink_burst%file_index * sink_burst%file_window, real64)
+      interval64  = real(sink_burst%write_interval, real64)
+
+      r_now = compute_rec_index(real(t,real64), win_start64, interval64)
+
+      tlen_local = 0
+      if (sink_burst%opened) then
+        ierr=nf90_inquire_dimension(sink_burst%ncid, &
+                                   sink_burst%dim_t, len=tlen_local)
+        if (ierr /= NF90_NOERR) call io_fatal('3D:timestep slot completion', ierr)
+      end if
+
+      if (r_now > tlen_local) then
+        want_write_burst = .true.
+      end if
+
+    end if
+
+  end if
 
   call process_sink_write(sink_burst, state, t, want_write_burst)
 

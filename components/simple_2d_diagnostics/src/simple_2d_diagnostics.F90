@@ -7,6 +7,13 @@ module simple_2d_diagnostics_mod
  ! - Physics/diagnostics math unchanged.
  ! The content of this file has been produced with the assistance of
  ! University of Leeds, m365 co-pilot
+ ! CRITICAL: time must be written last so tlen reflects completed records
+ ! IMPORTANT: file_index must be updated before computing record index
+ ! INVARIANT: file_window = per_file_count * write_interval
+ ! DESIGN:
+ ! Output is organised into discrete time slots:
+ !   r = compute_rec_index(t)
+ ! We write at most one record per slot.
  !==============================================================================
  use, intrinsic :: iso_fortran_env, only: int32, real64
  use netcdf
@@ -23,12 +30,12 @@ module simple_2d_diagnostics_mod
    ensure_dir, make_setdir, make_rowdir, &
    micro_stagger_sleep, &
    verify_coords_2d, cf_define_2d_var, &
-   compute_file_index, next_file_open_time, compute_xy_coords, &
+   compute_file_index, compute_xy_coords, &
    def_var_1d, def_time_1d, put_global_att, inq_varid_if_present, &
    c_usleep, join_path, pad3, &
    io_jitter, &
    precreate_rows_global, precreate_sets_for_this_row, global_barrier, &
-   compute_rec_index, default_time_tolerance, io_fatal
+   compute_rec_index, io_fatal
  implicit none
  private
  public :: simple_2d_diagnostics_get_descriptor
@@ -36,7 +43,6 @@ module simple_2d_diagnostics_mod
  !==================== Options (global) ====================
  real(default_precision) :: dump2d_interval = 0.0_default_precision
  integer :: dump2d_per_file = 0
- logical :: dump2d_write_t0 = .false.
  character(len=:), allocatable :: base_filename, dump2d_dir
  real(default_precision) :: dxx = 0.0_default_precision
  real(default_precision) :: dyy = 0.0_default_precision
@@ -71,19 +77,12 @@ module simple_2d_diagnostics_mod
     integer :: vid_rwp=-1, vid_swp=-1, vid_iwp=-1, vid_gwp=-1
     logical :: opened = .false.
     logical :: wrote_xy = .false.
-    logical :: append_mode = .false.
-    integer :: rec_index = -1
     logical :: skip_this_write = .false.
-    logical :: continuation_checked = .false.
     real(default_precision) :: write_interval = 0.0_default_precision
     real(default_precision) :: file_window = 0.0_default_precision
     real(default_precision) :: window_anchor = 0.0_default_precision
-    real(default_precision) :: next_write_time = huge(1.0_default_precision)
-    real(default_precision) :: next_file_open_time = huge(1.0_default_precision)
     integer :: file_index = 0
     integer :: per_file_count = 0
-    logical :: wrote_t0 = .false.
-    logical :: coords_verified_once = .false.
  end type sink_2d_type
 
  type(sink_2d_type) :: sink_norm, sink_burst
@@ -100,7 +99,7 @@ module simple_2d_diagnostics_mod
  real(default_precision), allocatable :: sen_ws(:,:), lat_ws(:,:)
  real(default_precision), allocatable :: rwp_ws(:,:), swp_ws(:,:), iwp_ws(:,:), gwp_ws(:,:)
 
- !==== vairables needed for directory pre-creation ====
+ !==== variables needed for directory pre-creation ====
  real(default_precision) :: termination_time = 0.0_default_precision
  real(default_precision) :: tmax_burst      = 0.0_default_precision
 
@@ -123,7 +122,6 @@ contains
 
    dump2d_interval = options_get_real(state%options_database,'dump_2d_interval')
    dump2d_per_file = options_get_integer(state%options_database,'dump_2d_per_file')
-   dump2d_write_t0 = options_get_logical(state%options_database,'dump_2d_write_t0')
    dxx = options_get_real(state%options_database,'dxx')
    dyy = options_get_real(state%options_database,'dyy')
    termination_time = options_get_real(state%options_database,'termination_time')
@@ -168,15 +166,10 @@ contains
    sink_norm%write_interval = dump2d_interval
    sink_norm%file_window    = normal_file_window
    sink_norm%window_anchor  = 0.0_default_precision
-   sink_norm%next_file_open_time = next_file_open_time(0, sink_norm%window_anchor, normal_file_window)
    sink_norm%opened         = .false.
    sink_norm%wrote_xy       = .false.
-   sink_norm%append_mode    = .false.
    sink_norm%file_index     = 0
    sink_norm%per_file_count = dump2d_per_file
-   sink_norm%wrote_t0       = .false.
-   sink_norm%continuation_checked = .false.
-   sink_norm%next_write_time = merge(0.0_default_precision, sink_norm%write_interval, dump2d_write_t0)
 
    ! Burst sink
    if (burst_enabled) then
@@ -184,15 +177,10 @@ contains
      sink_burst%write_interval = burst_interval
      sink_burst%file_window    = burst_file_window
      sink_burst%window_anchor  = burst_start
-     sink_burst%next_file_open_time = next_file_open_time(0, burst_start, burst_file_window)
-     sink_burst%next_write_time = burst_start
      sink_burst%opened         = .false.
      sink_burst%wrote_xy       = .false.
-     sink_burst%append_mode    = .false.
      sink_burst%file_index     = 0
      sink_burst%per_file_count = dump2d_burst_per_file
-     sink_burst%wrote_t0       = .false.
-     sink_burst%continuation_checked = .false.
    end if
 
    !=== Row-first precreation with two global barriers ===
@@ -234,23 +222,28 @@ contains
    ws_init = .false.; ws_nx = 0; ws_ny = 0 
  end subroutine finalise
  
-subroutine timestep(state)
+ subroutine timestep(state)
   use mpi
   type(model_state_type), target, intent(inout) :: state
+
   real(default_precision) :: t
-  integer(int32) :: idx_norm, idx_burst
   logical :: want_write_norm, want_write_burst
   logical :: rollover_local, rollover_all
   integer :: ierr
 
-  ! >>> ADDED FOR SLOT COMPLETION PATCH <<<
   real(real64) :: win_start64, interval64
-  integer :: r_now, tlen_local, ierr
+  integer :: r_now, tlen_local
+  integer :: new_file_index
 
   t = state%time
 
   ! ================= NORMAL =================
-  rollover_local = (t >= sink_norm%next_file_open_time)
+
+  new_file_index = compute_file_index( &
+       t, sink_norm%window_anchor, sink_norm%file_window)
+
+  rollover_local = (.not. sink_norm%opened) .or. &
+                   (new_file_index /= sink_norm%file_index)
 
   call MPI_Allreduce(rollover_local, rollover_all, 1, MPI_LOGICAL, MPI_LOR, &
                      MPI_COMM_WORLD, ierr)
@@ -260,49 +253,36 @@ subroutine timestep(state)
 
     call sink_close_if_open(sink_norm)
 
-    idx_norm = compute_file_index(t, &
-         sink_norm%window_anchor, sink_norm%file_window)
-
-    sink_norm%file_index = idx_norm
-    sink_norm%next_file_open_time = next_file_open_time( &
-         idx_norm, sink_norm%window_anchor, sink_norm%file_window)
+    sink_norm%file_index = new_file_index
   end if
 
-  want_write_norm = (t >= sink_norm%next_write_time) .or. &
-                    (dump2d_write_t0 .and. .not. state%continuation_run .and. &
-                     .not. sink_norm%wrote_t0 .and. t == 0.0_default_precision)
+  ! Compute record index to decide whether to write (do not pass r;
+  ! it will be recomputed inside process_sink_write for robustness)
 
-  ! Ensure one write attempt after restart (existing logic)
-  if (state%continuation_run .and. .not. sink_norm%continuation_checked) then
-    want_write_norm = .true.
-  end if
+  win_start64 = real(sink_norm%window_anchor + &
+                     sink_norm%file_index * sink_norm%file_window, real64)
+  interval64  = real(sink_norm%write_interval, real64)
 
-  ! >>> CRITICAL PATCH: enforce slot completion <<<
-  if (state%continuation_run) then
+  r_now = compute_rec_index(real(t,real64), win_start64, interval64)
 
-    win_start64 = real(sink_norm%window_anchor + &
-                       sink_norm%file_index * sink_norm%file_window, real64)
-    interval64  = real(sink_norm%write_interval, real64)
-
-    r_now = compute_rec_index(real(t,real64), win_start64, interval64)
-
-    tlen_local = 0
-    if (sink_norm%opened) then
-      ierr=nf90_inquire_dimension(sink_norm%ncid, &
+  tlen_local = 0
+  if (sink_norm%opened) then
+    ierr = nf90_inquire_dimension(sink_norm%ncid, &
                                  sink_norm%dim_t, len=tlen_local)
-      if (ierr /= NF90_NOERR) call io_fatal('2D:timestep slot completion', ierr)
-    end if
-
-    if (r_now > tlen_local) then
-      want_write_norm = .true.
-    end if
-
+    if (ierr /= NF90_NOERR) call io_fatal('2D:timestep norm', ierr)
   end if
+
+  want_write_norm = (r_now > tlen_local)
 
   call process_sink_write(sink_norm, state, t, want_write_norm)
 
   ! ================= BURST ==================
-  rollover_local = (t >= sink_burst%next_file_open_time)
+
+  new_file_index = compute_file_index( &
+       t, sink_burst%window_anchor, sink_burst%file_window)
+
+  rollover_local = (.not. sink_burst%opened) .or. &
+                   (new_file_index /= sink_burst%file_index)
 
   call MPI_Allreduce(rollover_local, rollover_all, 1, MPI_LOGICAL, MPI_LOR, &
                      MPI_COMM_WORLD, ierr)
@@ -312,60 +292,35 @@ subroutine timestep(state)
 
     call sink_close_if_open(sink_burst)
 
-    idx_burst = compute_file_index(t, &
-         sink_burst%window_anchor, sink_burst%file_window)
+    sink_burst%file_index = new_file_index
+  end if
 
-    sink_burst%file_index = idx_burst
-    sink_burst%next_file_open_time = next_file_open_time( &
-         idx_burst, sink_burst%window_anchor, sink_burst%file_window)
+  win_start64 = real(sink_burst%window_anchor + &
+                     sink_burst%file_index * sink_burst%file_window, real64)
+  interval64  = real(sink_burst%write_interval, real64)
+
+  r_now = compute_rec_index(real(t,real64), win_start64, interval64)
+
+  tlen_local = 0
+  if (sink_burst%opened) then
+    ierr = nf90_inquire_dimension(sink_burst%ncid, &
+                                 sink_burst%dim_t, len=tlen_local)
+    if (ierr /= NF90_NOERR) call io_fatal('2D:timestep burst', ierr)
   end if
 
   want_write_burst = burst_enabled .and. &
                      t >= burst_start .and. t < burst_end .and. &
-                     t >= sink_burst%next_write_time
-
-  ! Ensure one write attempt after restart (existing logic)
-  if (state%continuation_run .and. .not. sink_burst%continuation_checked) then
-    if (burst_enabled .and. t >= burst_start .and. t < burst_end) then
-      want_write_burst = .true.
-    end if
-  end if
-
-  ! >>> CRITICAL PATCH (burst) <<<
-  if (state%continuation_run) then
-
-    if (burst_enabled .and. t >= burst_start .and. t < burst_end) then
-
-      win_start64 = real(sink_burst%window_anchor + &
-                         sink_burst%file_index * sink_burst%file_window, real64)
-      interval64  = real(sink_burst%write_interval, real64)
-
-      r_now = compute_rec_index(real(t,real64), win_start64, interval64)
-
-      tlen_local = 0
-      if (sink_burst%opened) then
-        ierr=nf90_inquire_dimension(sink_burst%ncid, &
-                                   sink_burst%dim_t, len=tlen_local)
-        if (ierr /= NF90_NOERR) call io_fatal('2D:timestep slot completion', ierr)
-      end if
-
-      if (r_now > tlen_local) then
-        want_write_burst = .true.
-      end if
-
-    end if
-
-  end if
+                     (r_now > tlen_local)
 
   call process_sink_write(sink_burst, state, t, want_write_burst)
 
-end subroutine timestep
+ end subroutine timestep
 
- subroutine sink_ensure_open(sink, state, base_filename, t, dxx, dyy, fillv)
+ subroutine sink_ensure_open(sink, state, base_filename, dxx, dyy, fillv)
    type(sink_2d_type), intent(inout) :: sink
    type(model_state_type), target, intent(inout) :: state
    character(len=*), intent(in) :: base_filename
-   real(default_precision), intent(in) :: t, dxx, dyy
+   real(default_precision), intent(in) :: dxx, dyy
    real(default_precision), intent(in) :: fillv
    character(len=512) :: setdir, rowdir, fname
    integer :: rx, ry, ierr
@@ -480,68 +435,75 @@ end subroutine timestep
  end subroutine sink_define_file
 
  subroutine process_sink_write(sink, state, t, want_write)
-   type(sink_2d_type), intent(inout) :: sink
-   type(model_state_type), intent(inout) :: state
-   real(default_precision), intent(in) :: t
-   logical, intent(in) :: want_write
-   integer :: rec
-   ! NEW locals (minimal)
-   integer :: r, tlen, ierr, r_here
-   real(real64) :: win_start64, interval64, tol, t_here(1)
+  type(sink_2d_type), intent(inout) :: sink
+  type(model_state_type), intent(inout) :: state
+  real(default_precision), intent(in) :: t
+  logical, intent(in) :: want_write
 
-   if (.not. want_write) return
-   call ensure_ws(state)
-   call compute_all_diagnostics(state)
+  integer :: r, tlen, ierr, r_here
+  real(real64) :: win_start64, interval64
+  real(real64) :: t_here(1)
 
-   call sink_ensure_open(sink, state, base_filename, t, dxx, dyy, fillv2d)
+  if (.not. want_write) return
 
-   ! Recompute record index for THIS write
-   win_start64 = real(sink%window_anchor + sink%file_index * sink%file_window, real64)
-   interval64  = real(sink%write_interval, real64)
-   r = compute_rec_index(real(t,real64), win_start64, interval64)
-   r = min(max(1, r), sink%per_file_count)
-   sink%rec_index = r
+  call ensure_ws(state)
+  call compute_all_diagnostics(state)
 
-   ! One-time continuation guard (per simulation per sink)
-   sink%skip_this_write = .false.
-   if (state%continuation_run .and. .not. sink%continuation_checked) then
-     ierr = nf90_inquire_dimension(sink%ncid, sink%dim_t, len=tlen)
-     if (ierr == NF90_NOERR .and. r <= tlen) then
-       ierr = nf90_get_var(sink%ncid, sink%var_time, t_here, &
-                         start=(/r/), count=(/1/))
-       if (ierr == NF90_NOERR .and. t_here(1) == t_here(1)) then
-         r_here = compute_rec_index(t_here(1), win_start64, interval64)
-         if (r_here == r) then
-           sink%skip_this_write = .true.
-         end if
+  call sink_ensure_open(sink, state, base_filename, dxx, dyy, fillv2d)
+
+
+  ! Recompute r here (do not pass from timestep)
+  ! This keeps process_sink_write self-contained and ensures
+  ! slot mapping is always derived from current time.
+
+  ! --- compute record index ---
+  win_start64 = real(sink%window_anchor + &
+                     sink%file_index * sink%file_window, real64)
+  interval64  = real(sink%write_interval, real64)
+
+  r = compute_rec_index(real(t,real64), win_start64, interval64)
+  r = min(max(1, r), sink%per_file_count)
+
+  ! --- slot consistency check ---
+  sink%skip_this_write = .false.
+
+  ierr = nf90_inquire_dimension(sink%ncid, sink%dim_t, len=tlen)
+  if (ierr /= NF90_NOERR) call io_fatal('2D:process inquire_dimension', ierr)
+
+  if (r <= tlen) then
+
+    ierr = nf90_get_var(sink%ncid, sink%var_time, t_here, &
+                       start=(/r/), count=(/1/))
+    if (ierr /= NF90_NOERR) call io_fatal('2D:process get_var(time)', ierr)
+
+    if (t_here(1) == t_here(1)) then
+
+      r_here = compute_rec_index(t_here(1), win_start64, interval64)
+
+      if (r_here == r) then
+        sink%skip_this_write = .true.
       end if
-     end if
-     sink%continuation_checked = .true.
-   end if
 
-   if (sink%skip_this_write) then
-     if (dump2d_write_t0 .and. .not. state%continuation_run .and. t == 0.0_default_precision) then
-       sink%wrote_t0 = .true.
-       sink%next_write_time = sink%write_interval
-     else
-       sink%next_write_time = sink%next_write_time + sink%write_interval
-     end if
-     return
-   end if
+    end if
 
-   call sink_write_xy(sink, state, dxx, dyy)
-   rec = sink%rec_index
-   call sink_put_all_fields(sink, rec)
-   call io_jitter()
-   if (opt_micro_stagger) call micro_stagger_sleep(real(micro_stagger_max_us, kind=real64))
-   call sink_put_time(sink, t, rec)
- 
-   if (dump2d_write_t0 .and. t == 0.0_default_precision) then
-     sink%wrote_t0 = .true.
-     sink%next_write_time = sink%write_interval
-   else
-     sink%next_write_time = sink%next_write_time + sink%write_interval
-   end if
+  end if
+
+  if (sink%skip_this_write) return
+
+  ! --- do write ---
+  call sink_write_xy(sink, state, dxx, dyy)
+
+  call sink_put_all_fields(sink, r)
+
+  call io_jitter()
+
+  if (opt_micro_stagger) &
+    call micro_stagger_sleep(real(micro_stagger_max_us, kind=real64))
+
+  ! commit slot
+  ierr = nf90_put_var(sink%ncid, sink%var_time, real(t,real64), start=(/r/))
+  if (ierr /= NF90_NOERR) call io_fatal('2D:process put_time', ierr)
+
  end subroutine process_sink_write
 
  subroutine sink_write_xy(sink, state, dxx, dyy)
@@ -550,7 +512,6 @@ end subroutine timestep
    real(default_precision), intent(in) :: dxx, dyy
    integer :: gx0, gx1, gy0, gy1, ierr
    real(real64), allocatable :: x(:), y(:)
-   logical :: ok
 
    if (sink%wrote_xy) return
 
@@ -624,7 +585,6 @@ end subroutine timestep
    if (ierr /= NF90_NOERR) call io_fatal('2D:close', ierr)
    sink%opened = .false.
    sink%wrote_xy = .false.
-   sink%append_mode= .false.
  end subroutine sink_close
 
  subroutine compute_all_diagnostics(S)

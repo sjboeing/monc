@@ -19,7 +19,7 @@ module monc_simple_io_utils_mod
  public :: verify_coords_2d, verify_coords_3d
  public :: get_q_cf_metadata
  public :: cf_define_2d_var, cf_define_3d_var
- public :: compute_file_index, next_file_open_time
+ public :: compute_file_index
  public :: compute_xy_coords, compute_dual_xy_coords
  public :: make_setdir, make_rowdir
  public :: def_var_1d, def_var_1d_plain, def_time_1d, put_global_att
@@ -544,13 +544,6 @@ contains
      if (idx < 0) idx = 0
    end if
  end function compute_file_index
-
- pure function next_file_open_time(idx,anchor,window) result(topen)
-   integer,     intent(in) :: idx
-   real(real64),intent(in) :: anchor,window
-   real(real64) :: topen
-   topen = anchor + (idx+1)*window
- end function next_file_open_time
 
  !=================================================
  ! Coordinate constructors

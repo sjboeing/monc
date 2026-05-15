@@ -678,7 +678,6 @@ dump_2d_burst_start            = 3600.0
 dump_2d_burst_end              = 3900.0
 dump_2d_burst_interval         = 10.0
 dump_2d_burst_per_file         = 30
-dump_2d_write_t0               = true
 
 dump_3d_interval               = 600.0
 dump_3d_per_file               = 6
@@ -691,4 +690,3 @@ dump_3d_burst_start            = 3600.0
 dump_3d_burst_end              = 3900.0
 dump_3d_burst_interval         = 30.0
 dump_3d_burst_per_file         = 6
-dump_3d_write_t0               = true

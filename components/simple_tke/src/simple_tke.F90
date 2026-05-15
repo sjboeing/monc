@@ -77,7 +77,8 @@ subroutine timestep(current_state)
       current_state%sgs_dissipation%data(k,iy,ix) = diss
 
       if (diss > 0.0_dp .and. nut > 0.0_dp) then
-         L2 = nut / sqrt(max(1.0_dp - Ri_col(k)*(kappa/nut), 1.0e-12_dp))
+         L2 = nut / sqrt(ssq_col(k)*max(1.0_dp - Ri_col(k)*(kappa/nut), 1.0e-12_dp))
+         ! Use hard_coded value of a2_n = 0.23
          current_state%sgs_tke%data(k,iy,ix) = ((diss*diss*L2)**(1.0_dp/3.0_dp)) / 0.23_dp
       else
          current_state%sgs_tke%data(k,iy,ix) = 0.0_dp

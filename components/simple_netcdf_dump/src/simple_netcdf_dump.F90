@@ -7,12 +7,16 @@ module simple_netcdf_dump_mod
  ! The content of this file has been produced with the assistance of
  ! University of Leeds, m365 co-pilot
  ! CRITICAL: time must be written last so tlen reflects completed records
- ! IMPORTANT: file_index must be updated before computing record index
- ! INVARIANT: file_window = per_file_count * write_interval
+ ! IMPORTANT: file_index is derived from global_slot
  ! DESIGN:
  ! Output is organised into discrete time slots:
- !   r = compute_rec_index(t)
+ !   global_slot = compute_global_slot(t)
+ !   (file_index, r) = split_global_slot(global_slot)
+ !
  ! We write at most one record per slot.
+ !
+ ! INVARIANT:
+ !   global_slot uniquely determines (file_index, r)
  !==============================================================================
  use, intrinsic :: iso_fortran_env, only : int32, real64
  use netcdf
@@ -30,7 +34,7 @@ module simple_netcdf_dump_mod
    micro_stagger_sleep, &
    inq_varid_if_present, verify_coords_3d, &
    get_q_cf_metadata, cf_define_3d_var, &
-   compute_file_index, &
+   compute_global_slot, split_global_slot, &
    compute_xy_coords, compute_dual_xy_coords, &
    sanitise_registry_name, &
    def_var_1d, def_var_1d_plain, def_time_1d, put_global_att, &
@@ -38,7 +42,7 @@ module simple_netcdf_dump_mod
    c_usleep, join_path, pad3, &
    io_jitter, &
    precreate_rows_global, precreate_sets_for_this_row, global_barrier, &
-   compute_rec_index, io_fatal
+   io_fatal
  implicit none
  private
  public :: simple_netcdf_dump_get_descriptor
@@ -94,12 +98,11 @@ module simple_netcdf_dump_mod
 
    logical :: opened = .false.
    logical :: wrote_coords = .false.
-   logical :: skip_this_write = .false.
 
    real(default_precision) :: write_interval = 0.0_default_precision
-   real(default_precision) :: file_window    = 0.0_default_precision
    real(default_precision) :: window_anchor  = 0.0_default_precision
    integer :: file_index = 0
+   integer :: last_slot = -1
    integer :: per_file_count = 0
  end type sink_3d_type
 
@@ -174,22 +177,22 @@ contains
    ! Normal sink
    sink_norm%root_dir       = dump3d_dir
    sink_norm%write_interval = dump3d_interval
-   sink_norm%file_window    = normal_file_window
    sink_norm%window_anchor  = 0.0_default_precision
    sink_norm%opened         = .false.
    sink_norm%wrote_coords   = .false.
    sink_norm%file_index     = 0
+   sink_norm%last_slot      = -1
    sink_norm%per_file_count = dump3d_per_file
 
    ! Burst sink
    if (burst_enabled) then
      sink_burst%root_dir       = trim(dump3d_dir)//"_burst"
      sink_burst%write_interval = burst_interval
-     sink_burst%file_window    = burst_file_window
      sink_burst%window_anchor  = burst_start
      sink_burst%opened         = .false.
      sink_burst%wrote_coords   = .false.
      sink_burst%file_index     = 0
+     sink_burst%last_slot      = -1
      sink_burst%per_file_count = dump3d_burst_per_file
    end if
 
@@ -241,171 +244,120 @@ contains
    ws3d_init = .false.; ws_nx = 0; ws_ny = 0; ws_nz = 0
  end subroutine finalise
 
- subroutine process_sink_write(sink, state, t, want_write)
-  type(sink_3d_type), intent(inout) :: sink
-  type(model_state_type), intent(inout) :: state
-  real(default_precision), intent(in) :: t
-  logical, intent(in) :: want_write
-
-  integer :: r, tlen, ierr, r_here
-  real(real64) :: win_start64, interval64
-  real(real64) :: t_here(1)
-
-  if (.not. want_write) return
-
-  call sink_ensure_open(sink, state, base_filename, dxx, dyy, fillv3d)
-
-  ! Recompute r here (do not pass from timestep)
-  ! This keeps process_sink_write self-contained and ensures
-  ! slot mapping is always derived from current time.
-
-  win_start64 = real(sink%window_anchor + &
-                     sink%file_index * sink%file_window, real64)
-  interval64  = real(sink%write_interval, real64)
-
-  r = compute_rec_index(real(t,real64), win_start64, interval64)
-  r = min(max(1, r), sink%per_file_count)
-
-  sink%skip_this_write = .false.
-
-  ierr = nf90_inquire_dimension(sink%ncid, sink%dim_t, len=tlen)
-  if (ierr /= NF90_NOERR) call io_fatal('process: inquire_dimension', ierr)
-
-  if (r <= tlen) then
-
-    ierr = nf90_get_var(sink%ncid, sink%var_time, t_here, &
-                       start=(/r/), count=(/1/))
-    if (ierr /= NF90_NOERR) call io_fatal('process: get_var(time)', ierr)
-
-    if (t_here(1) == t_here(1)) then
-
-      r_here = compute_rec_index(t_here(1), win_start64, interval64)
-
-      if (r_here == r) then
-        sink%skip_this_write = .true.
-      end if
-
-    end if
-
-  end if
-
-  if (sink%skip_this_write) return
-
-  call sink_write_coords_and_refs(sink, state, dxx, dyy)
-  call ensure_ws3d(state)
-
-  call sink_put_xyz_t(sink, sink%vid_u, state%u%data, state, r, plus_scalar=state%ugal)
-  call sink_put_xyz_t(sink, sink%vid_v, state%v%data, state, r, plus_scalar=state%vgal)
-  call sink_put_xyz_t(sink, sink%vid_w, state%w%data, state, r)
-  call sink_put_xyz_t(sink, sink%vid_th, state%th%data, state, r, plus_thref=.true.)
-  call sink_put_xyz_t(sink, sink%vid_sgs_tke, state%sgs_tke%data, state, r)
-  call sink_put_xyz_t(sink, sink%vid_sgs_dissipation, state%sgs_dissipation%data, state, r)
-
-  if (allocated(sink%q_vid)) call sink_put_all_q(sink, state, r)
-  if (opt_micro_stagger) call micro_stagger_sleep(real(micro_stagger_max_us,kind=real64))
-
-  ierr = nf90_put_var(sink%ncid, sink%var_time, real(t,real64), start=(/r/))
-  if (ierr /= NF90_NOERR) call io_fatal('process: put_time', ierr)
-
- end subroutine process_sink_write
-
  subroutine timestep(state)
-  use mpi
-  type(model_state_type), target, intent(inout) :: state
+   type(model_state_type), target, intent(inout) :: state
+   real(default_precision) :: t
+   logical :: active_burst
 
-  real(default_precision) :: t
-  logical :: want_write_norm, want_write_burst
-  logical :: rollover_local, rollover_all
-  integer :: ierr
+   t = state%time
 
-  real(real64) :: win_start64, interval64
-  integer :: r_now, tlen_local
-  integer :: new_file_index
+   ! NORMAL
+   call timestep_one_sink(sink_norm, state, t)
 
-  t = state%time
+   ! BURST
+   active_burst = burst_enabled .and. &
+                 (t >= burst_start) .and. (t < burst_end)
 
-  ! ================= NORMAL =================
-
-  ! --- compute correct file index from time ---
-  new_file_index = compute_file_index( &
-       t, sink_norm%window_anchor, sink_norm%file_window)
-
-  rollover_local = (.not. sink_norm%opened) .or. &
-                   (new_file_index /= sink_norm%file_index)
-
-  call MPI_Allreduce(rollover_local, rollover_all, 1, MPI_LOGICAL, MPI_LOR, &
-                     MPI_COMM_WORLD, ierr)
-
-  if (rollover_all) then
-    call global_barrier()
-
-    if (sink_norm%opened) call sink_close(sink_norm)
-
-    sink_norm%file_index = new_file_index
-  end if
-
-  ! --- compute slot index ---
-
-  ! Compute record index to decide whether to write (do not pass r;
-  ! it will be recomputed inside process_sink_write for robustness)
-
-  win_start64 = real(sink_norm%window_anchor + &
-                     sink_norm%file_index * sink_norm%file_window, real64)
-  interval64  = real(sink_norm%write_interval, real64)
-
-  r_now = compute_rec_index(real(t,real64), win_start64, interval64)
-
-  ! --- check file state ---
-  tlen_local = 0
-  if (sink_norm%opened) then
-    ierr = nf90_inquire_dimension(sink_norm%ncid, &
-                                 sink_norm%dim_t, len=tlen_local)
-    if (ierr /= NF90_NOERR) call io_fatal('timestep norm: inquire_dimension', ierr)
-  end if
-
-  want_write_norm = (r_now > tlen_local)
-
-  call process_sink_write(sink_norm, state, t, want_write_norm)
-
-  ! ================= BURST ==================
-
-  new_file_index = compute_file_index( &
-       t, sink_burst%window_anchor, sink_burst%file_window)
-
-  rollover_local = (.not. sink_burst%opened) .or. &
-                   (new_file_index /= sink_burst%file_index)
-
-  call MPI_Allreduce(rollover_local, rollover_all, 1, MPI_LOGICAL, MPI_LOR, &
-                     MPI_COMM_WORLD, ierr)
-
-  if (rollover_all) then
-    call global_barrier()
-
-    if (sink_burst%opened) call sink_close(sink_burst)
-
-    sink_burst%file_index = new_file_index
-  end if
-
-  win_start64 = real(sink_burst%window_anchor + &
-                     sink_burst%file_index * sink_burst%file_window, real64)
-  interval64  = real(sink_burst%write_interval, real64)
-
-  r_now = compute_rec_index(real(t,real64), win_start64, interval64)
-
-  tlen_local = 0
-  if (sink_burst%opened) then
-    ierr = nf90_inquire_dimension(sink_burst%ncid, &
-                                 sink_burst%dim_t, len=tlen_local)
-    if (ierr /= NF90_NOERR) call io_fatal('timestep burst: inquire_dimension', ierr)
-  end if
-
-  want_write_burst = burst_enabled .and. &
-                     t >= burst_start .and. t < burst_end .and. &
-                     (r_now > tlen_local)
-
-  call process_sink_write(sink_burst, state, t, want_write_burst)
+   if (active_burst) then
+     call timestep_one_sink(sink_burst, state, t)
+   endif
 
  end subroutine timestep
+
+ subroutine timestep_one_sink(sink, state, t)
+   type(sink_3d_type), intent(inout) :: sink
+   type(model_state_type), intent(inout) :: state
+
+   real(default_precision), intent(in) :: t
+
+   integer :: global_slot, file_index, r
+   real(real64) :: anchor64, interval64
+
+   ! ---------------------------------------
+   ! Map time -> global slot
+   ! ---------------------------------------
+   anchor64   = real(sink%window_anchor, real64)
+   interval64 = real(sink%write_interval, real64)
+
+   global_slot = compute_global_slot(real(t,real64), anchor64, interval64)
+
+   ! ---------------------------------------
+   ! Skip duplicate slot
+   ! ---------------------------------------
+   if (global_slot == sink%last_slot) return
+   sink%last_slot = global_slot
+
+   ! ---------------------------------------
+   ! Split slot -> (file_index, r)
+   ! ---------------------------------------
+   call split_global_slot(global_slot, sink%per_file_count, file_index, r)
+
+   ! ---------------------------------------
+   ! Ensure correct file
+   ! ---------------------------------------
+   if (file_index /= sink%file_index) then
+     if (sink%opened) call sink_close(sink)
+     sink%file_index = file_index
+   end if
+
+   ! ---------------------------------------
+   ! Delegate write decision
+   ! ---------------------------------------
+   call process_sink_write(sink, state, t, r)
+
+ end subroutine timestep_one_sink
+
+ subroutine process_sink_write(sink, state, t, r)
+   type(sink_3d_type), intent(inout) :: sink
+   type(model_state_type), intent(inout) :: state
+
+   real(default_precision), intent(in) :: t
+   integer, intent(in) :: r
+
+   integer :: tlen, ierr
+
+   ! ---------------------------------------
+   ! Ensure file open
+   ! ---------------------------------------
+   call sink_ensure_open(sink, state, base_filename, dxx, dyy, fillv3d)
+
+   ! ---------------------------------------
+   ! Query current length
+   ! ---------------------------------------
+   ierr = nf90_inquire_dimension(sink%ncid, sink%dim_t, len=tlen)
+   if (ierr /= NF90_NOERR) call io_fatal('process inquire_dimension', ierr)
+
+   ! ---------------------------------------
+   ! STRICT append rule
+   ! ---------------------------------------
+   if (r /= tlen + 1) return
+
+   ! ---------------------------------------
+   ! Perform write
+   ! ---------------------------------------
+   call sink_write_coords_and_refs(sink, state, dxx, dyy)
+   call ensure_ws3d(state)
+
+   call sink_put_xyz_t(sink, sink%vid_u, state%u%data, state, r, plus_scalar=state%ugal)
+   call sink_put_xyz_t(sink, sink%vid_v, state%v%data, state, r, plus_scalar=state%vgal)
+   call sink_put_xyz_t(sink, sink%vid_w, state%w%data, state, r)
+   call sink_put_xyz_t(sink, sink%vid_th, state%th%data, state, r, plus_thref=.true.)
+   call sink_put_xyz_t(sink, sink%vid_sgs_tke, state%sgs_tke%data, state, r)
+   call sink_put_xyz_t(sink, sink%vid_sgs_dissipation, state%sgs_dissipation%data, state, r)
+
+   if (allocated(sink%q_vid)) call sink_put_all_q(sink, state, r)
+
+   if (opt_micro_stagger) &
+     call micro_stagger_sleep(real(micro_stagger_max_us,kind=real64))
+   call io_jitter()
+
+   ! ---------------------------------------
+   ! Commit time LAST
+   ! ---------------------------------------
+   ierr = nf90_put_var(sink%ncid, sink%var_time, real(t,real64), start=(/r/))
+   if (ierr /= NF90_NOERR) call io_fatal('process: put_time', ierr)
+
+ end subroutine process_sink_write
 
  subroutine sink_ensure_open(sink, state, base_filename, dxx, dyy, fillv)
    type(sink_3d_type), intent(inout) :: sink
@@ -426,8 +378,8 @@ contains
    fname  = join_path(setdir, trim(base_filename)//'.x'//pad3(rx)//'.y'//pad3(ry)//'.nc')
    sink%final_fname = fname
 
-   call io_jitter()
    if (opt_micro_stagger) call micro_stagger_sleep(real(micro_stagger_max_us, kind=real64))
+   call io_jitter()
    ierr = nf90_create(trim(fname), ior(NF90_NOCLOBBER, NF90_64BIT_OFFSET), sink%ncid)
    if (ierr == NF90_EEXIST) ierr = nf90_open(trim(fname), NF90_WRITE, sink%ncid)
    if (ierr /= NF90_NOERR) call io_fatal('3D:sink_ensure_open:create/open('//trim(fname)//')', ierr)
@@ -524,8 +476,8 @@ contains
    call put_global_att(sink%ncid,"source","MONC LES")
    call put_global_att(sink%ncid,"title","MONC 3D output (CDF-2)")
 
-   call io_jitter()
    if (opt_micro_stagger) call micro_stagger_sleep(real(micro_stagger_max_us, kind=real64))
+   call io_jitter()
    ierr = nf90_enddef(sink%ncid)
    if (ierr /= NF90_NOERR) call io_fatal('3D:enddef', ierr)
    ierr = nf90_set_fill(sink%ncid, NF90_NOFILL, ierr)
@@ -664,8 +616,8 @@ contains
    type(sink_3d_type), intent(inout) :: sink
    integer :: ierr
    if (.not. sink%opened) return
-   call io_jitter()
    if (opt_micro_stagger) call micro_stagger_sleep(real(micro_stagger_max_us, kind=real64))
+   call io_jitter()
    ierr = nf90_close(sink%ncid)
    if (ierr /= NF90_NOERR) call io_fatal('3D:close', ierr)
    sink%opened = .false.

@@ -29,7 +29,7 @@ module monc_simple_io_utils_mod
  public :: is_world_leader, is_row_leader
  public :: precreate_rows_global, precreate_sets_for_this_row
  public :: global_barrier
- public :: compute_rec_index
+ public :: compute_global_slot, split_global_slot
  public :: default_time_tolerance
 
  !============== POSIX mkdir binding =============
@@ -589,18 +589,30 @@ contains
    if (st /= NF90_NOERR) call io_fatal(where, st)
  end subroutine chk
 
- pure function compute_rec_index(t, win_start, interval) result(rec)
-   ! r = 1 + floor((t - win_start + eps) / interval), clamped to >= 1
-   real(real64), intent(in) :: t, win_start, interval
-   integer :: rec
-   real(real64) :: rreal, eps
+ pure function compute_global_slot(t, anchor, interval) result(slot)
+   real(real64), intent(in) :: t, anchor, interval
+   integer :: slot
+   real(real64) :: x, eps
 
    eps = default_time_tolerance(interval)
-   rreal = 1.0d0 + floor((t - win_start + eps) / interval)
-   if (rreal < 1.0d0) rreal = 1.0d0
-   rec = int(rreal)
- end function compute_rec_index
 
+   ! Robust mapping: push borderline values forward
+   x = (t - anchor + eps) / interval
+
+   ! Floor gives 0-based slot index
+   slot = floor(x)
+
+   if (slot < 0) slot = 0
+ end function compute_global_slot
+
+ pure subroutine split_global_slot(slot, slots_per_file, file_index, r)
+   integer, intent(in)  :: slot, slots_per_file
+   integer, intent(out) :: file_index, r
+
+   file_index = slot / slots_per_file
+   r          = mod(slot, slots_per_file) + 1
+ end subroutine split_global_slot
+ 
  pure function default_time_tolerance(interval) result(tol)
    real(real64), intent(in) :: interval
    real(real64) :: tol

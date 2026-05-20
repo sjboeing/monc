@@ -15,6 +15,16 @@ cd "$PBS_O_WORKDIR"
 echo "[INFO] Job started at $(date)"
 echo "[INFO] Working directory: $PWD"
 
+# ---------- Continuation marker ----------
+CHAIN_OK_FILE="CHAIN_OK.flag"
+
+if [[ "${CHAIN_INDEX:-0}" -gt 0 && ! -f "$CHAIN_OK_FILE" ]]; then
+  echo "[INFO] Previous job did not mark continuation OK — stopping chain"
+  exit 0
+fi
+
+rm -f "$CHAIN_OK_FILE"
+
 # ---------- Walltime handler ----------
 WALLTIME_EXIT=0
 
@@ -52,11 +62,11 @@ fi
 # Submit next job first
 # -----------------------
 
-qsub -W depend=afterok:$PBS_JOBID \
+NEXT_JOB=$(qsub -W depend=afterany:$PBS_JOBID \
      -v CHAIN_INDEX=$((CHAIN_INDEX+1)) \
-     "$0"
+     "$0")
 
-echo "[INFO] Submitted next chain job"
+echo "[INFO] Submitted next chain job: $NEXT_JOB"
 
 # -----------------------
 # Environment
@@ -76,6 +86,7 @@ export NUMEXPR_NUM_THREADS=1
 # Run stitching
 # -----------------------
 
+PYEXIT=0
 python ./stitch_v2.py \
   --datasets \
     "$PWD/arm_2d" \
@@ -90,6 +101,8 @@ python ./stitch_v2.py \
 
 if [[ "${WALLTIME_EXIT}" -eq 1 ]]; then
   echo "[INFO] Walltime termination — exiting 0 to allow restart"
+  touch "$CHAIN_OK_FILE"
+  sync
   exit 0
 fi
 

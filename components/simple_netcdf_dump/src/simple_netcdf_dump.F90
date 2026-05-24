@@ -301,7 +301,7 @@ contains
    end if
 
    ! ---------------------------------------
-   ! Delegate write decision
+   ! process_sink_write is the ONLY place that decides if a write occurs
    ! ---------------------------------------
    call process_sink_write(sink, state, t, r)
 
@@ -326,6 +326,16 @@ contains
    ! ---------------------------------------
    ierr = nf90_inquire_dimension(sink%ncid, sink%dim_t, len=tlen)
    if (ierr /= NF90_NOERR) call io_fatal('process inquire_dimension', ierr)
+
+ 
+   ! ---------------------------------------
+   ! Fail loudly: first global record must not see file
+   ! ---------------------------------------
+   if (.not. state%continuation_run) then
+     if (sink%file_index == 0 .and. r == 1 .and. tlen > 0) then
+       call io_fatal('Output directory not clean at start of run', -1)
+     end if
+   end if
 
    ! ---------------------------------------
    ! STRICT append rule
@@ -754,7 +764,7 @@ contains
 
    subroutine get_q_cf_metadata_safe(monc_name_in, stdn, units)
      character(len=*), intent(in) :: monc_name_in
-     character(len=*), intent(out):: stdn, units
+     character(len=*), intent(inout):: stdn, units
      character(len=128) :: tmp
      tmp = monc_name_in
      call get_q_cf_metadata(trim(tmp), stdn, units)

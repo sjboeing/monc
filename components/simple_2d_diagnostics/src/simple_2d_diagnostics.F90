@@ -106,6 +106,8 @@ module simple_2d_diagnostics_mod
  real(default_precision) :: termination_time = 0.0_default_precision
  real(default_precision) :: tmax_burst      = 0.0_default_precision
 
+ real(default_precision) :: last_diag_time = -1.0_default_precision
+
 contains
 
  function simple_2d_diagnostics_get_descriptor() result(desc)
@@ -193,6 +195,8 @@ contains
    !=== Row-first precreation with two global barriers ===
    rx = state%parallel%my_coords(x_index)
    ry = state%parallel%my_coords(y_index)
+
+   last_diag_time = -1.0_default_precision
 
    call precreate_rows_global(dump2d_dir, ry, rx)
    if (burst_enabled) call precreate_rows_global(trim(dump2d_dir)//'_burst', ry, rx)
@@ -434,9 +438,27 @@ contains
    if (ierr /= NF90_NOERR) call io_fatal('process inquire_dimension', ierr)
 
    ! ---------------------------------------
+   ! Fail loudly: first global record must not see file
+   ! ---------------------------------------
+   if (.not. state%continuation_run) then
+     if (sink%file_index == 0 .and. r == 1 .and. tlen > 0) then
+       call io_fatal('Output directory not clean at start of run', -1)
+     end if
+   end if
+
+   ! ---------------------------------------
    ! STRICT append rule
    ! ---------------------------------------
    if (r /= tlen + 1) return
+
+   ! ---------------------------------------
+   ! Ensure diagnostics computed (ON DEMAND)
+   ! ---------------------------------------
+   if (t /= last_diag_time) then
+     call ensure_ws(state)
+     call compute_all_diagnostics(state)
+     last_diag_time = t
+   end if
 
    ! ---------------------------------------
    ! Perform write
@@ -880,6 +902,22 @@ subroutine compute_vwp(S)
      ws_ny=ny
      ws_init=.true.
    end if
+
+   vwp_ws   = fillv2d
+   lwp_ws   = fillv2d
+   qlmax_ws = fillv2d
+   hqlmax_ws= fillv2d
+   clbas_ws = fillv2d
+   cltop_ws = fillv2d
+   wmax_ws  = fillv2d
+   wmin_ws  = fillv2d
+   sen_ws   = fillv2d
+   lat_ws   = fillv2d
+   rwp_ws   = fillv2d
+   swp_ws   = fillv2d
+   iwp_ws   = fillv2d
+   gwp_ws   = fillv2d
+
  end subroutine ensure_ws
 
  subroutine map_q_indices(state)
